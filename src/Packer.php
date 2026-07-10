@@ -18,6 +18,9 @@ use WeakMap;
 
 use function array_pop;
 use function count;
+use function intdiv;
+use function max;
+use function min;
 use function usort;
 
 use const PHP_INT_MAX;
@@ -43,6 +46,8 @@ class Packer implements LoggerAwareInterface
     protected PackedBoxSorter $packedBoxSorter;
 
     protected bool $throwOnUnpackableItem = true;
+
+    protected bool $quantityShortCircuit = false;
 
     private bool $beStrictAboutItemOrdering = false;
 
@@ -152,6 +157,22 @@ class Packer implements LoggerAwareInterface
         $this->throwOnUnpackableItem = $throwOnUnpackableItem;
     }
 
+    /**
+     * Enable/disable the large-quantity short-circuit optimisation.
+     *
+     * When enabled, packing large numbers of identical (or few distinct) items becomes dramatically faster: each box
+     * evaluation is bounded to the number of items that could physically fit, and once a box has been solved its exact
+     * makeup is replicated for as many further boxfuls as the remaining stock allows rather than being re-solved. The
+     * resulting set of boxes is identical to packing with it disabled.
+     *
+     * Disabled by default. Has no effect when items require constrained placement, are linked, or when strict item
+     * ordering has been requested - in those cases packing proceeds exactly as if it were disabled.
+     */
+    public function setQuantityShortCircuit(bool $quantityShortCircuit): void
+    {
+        $this->quantityShortCircuit = $quantityShortCircuit;
+    }
+
     public function beStrictAboutItemOrdering(bool $beStrict): void
     {
         $this->beStrictAboutItemOrdering = $beStrict;
@@ -197,10 +218,19 @@ class Packer implements LoggerAwareInterface
         while ($this->items->count()) {
             $packedBoxesIteration = [];
 
+            // The short-circuit optimisation cannot be applied when placement depends on what else is in the box
+            // (constrained/linked items) or when the caller has asked for the item ordering to be preserved exactly.
+            $shortCircuit = $this->quantityShortCircuit
+                && !$this->beStrictAboutItemOrdering
+                && !$this->items->hasConstrainedItems()
+                && !$this->items->hasLinkedItems();
+            $signatureData = $shortCircuit ? $this->items->getSignatureData() : [];
+
             // Loop through boxes starting with smallest, see what happens
             foreach ($this->getBoxList($enforceSingleBox) as $box) {
                 $this->timeoutChecker?->throwOnTimeout();
-                $volumePacker = new VolumePacker($box, $this->items);
+                $itemsForBox = $shortCircuit ? $this->itemsForBoxEvaluation($box, $signatureData) : $this->items;
+                $volumePacker = new VolumePacker($box, $itemsForBox);
                 $volumePacker->setLogger($this->logger);
                 $volumePacker->beStrictAboutItemOrdering($this->beStrictAboutItemOrdering);
                 $packedBox = $volumePacker->pack();
@@ -228,6 +258,14 @@ class Packer implements LoggerAwareInterface
 
                 $packedBoxes->insert($bestBox);
                 --$this->boxQuantitiesAvailable[$bestBox->box];
+
+                // Having solved one box, replicate its exact makeup for as many further identical boxfuls as the
+                // remaining stock of both items and boxes allows, rather than re-solving each one from scratch.
+                if ($shortCircuit) {
+                    foreach ($this->replicateIdenticalBoxes($bestBox) as $replica) {
+                        $packedBoxes->insert($replica);
+                    }
+                }
             } elseif ($this->throwOnUnpackableItem) {
                 throw new NoBoxesAvailableException("No boxes could be found for item '{$this->items->top()->getDescription()}'", $this->items);
             } else {
@@ -345,5 +383,101 @@ class Packer implements LoggerAwareInterface
         $this->logger->log(LogLevel::INFO, 'Box search pattern complete', ['preferredBoxCount' => count($preferredBoxes), 'otherBoxCount' => count($otherBoxes)]);
 
         return [...$preferredBoxes, ...$otherBoxes];
+    }
+
+    /**
+     * Bound the set of items handed to the volume packer for a single box evaluation.
+     *
+     * A box can only ever hold a limited number of copies of each distinct item type (limited by volume, and by
+     * weight), so supplying more copies than that cannot change how the box packs. Supplying only that many, however,
+     * makes the cost of evaluating a box independent of the total quantity remaining to be packed. If no signature
+     * needs capping for this box the full list is returned unchanged so behaviour is preserved exactly.
+     *
+     * @param array<string, array{item: Item, count: int}> $signatureData
+     */
+    private function itemsForBoxEvaluation(Box $box, array $signatureData): ItemList
+    {
+        $innerVolume = $box->getInnerWidth() * $box->getInnerLength() * $box->getInnerDepth();
+        $netWeight = $box->getMaxWeight() - $box->getEmptyWeight();
+
+        $caps = [];
+        $needsCap = false;
+        foreach ($signatureData as $signature => $data) {
+            $item = $data['item'];
+            $unitVolume = max($item->getWidth() * $item->getLength() * $item->getDepth(), 1);
+            $capacity = intdiv($innerVolume, $unitVolume);
+            if ($item->getWeight() > 0) {
+                $capacity = min($capacity, intdiv($netWeight, $item->getWeight()));
+            }
+            if ($capacity < 0) {
+                $capacity = 0;
+            }
+            $caps[$signature] = $capacity;
+            if ($capacity < $data['count']) {
+                $needsCap = true;
+            }
+        }
+
+        if (!$needsCap) {
+            return $this->items;
+        }
+
+        return $this->items->cappedBySignature($caps);
+    }
+
+    /**
+     * Given a box that has just been packed and removed from the pool, produce as many identical copies of it as the
+     * remaining items and box stock allow.
+     *
+     * A copy can be made for every further boxful of each of its constituent item types present in the pool. The
+     * number of copies is the smallest such count across all item types, further limited by the remaining stock of
+     * this box type. At least one boxful of the limiting type is deliberately left behind so that the final (possibly
+     * partial) box is always solved by the normal packing loop rather than assumed to be full.
+     *
+     * @return PackedBox[]
+     */
+    private function replicateIdenticalBoxes(PackedBox $template): array
+    {
+        $perBox = $template->items->count();
+        if ($perBox === 0 || $this->boxQuantitiesAvailable[$template->box] <= 0) {
+            return [];
+        }
+
+        $boxCounts = [];
+        foreach ($template->items as $packedItem) {
+            $signature = ItemList::signatureOf($packedItem->item);
+            $boxCounts[$signature] = ($boxCounts[$signature] ?? 0) + 1;
+        }
+
+        $poolData = $this->items->getSignatureData();
+
+        $replications = $this->boxQuantitiesAvailable[$template->box];
+        foreach ($boxCounts as $signature => $need) {
+            $have = $poolData[$signature]['count'] ?? 0;
+            if ($have <= $need) {
+                return []; // one boxful or fewer remains; leave it for the normal loop
+            }
+            $possible = intdiv($have - $need - 1, $need) + 1;
+            if ($possible < $replications) {
+                $replications = $possible;
+            }
+        }
+        if ($replications <= 0) {
+            return [];
+        }
+
+        $clones = [];
+        for ($i = 0; $i < $replications; ++$i) {
+            $clones[] = new PackedBox($template->box, $template->items);
+        }
+        $this->boxQuantitiesAvailable[$template->box] -= $replications;
+
+        $toRemove = [];
+        foreach ($boxCounts as $signature => $need) {
+            $toRemove[$signature] = $need * $replications;
+        }
+        $this->items->removeBySignatureMultiset($toRemove);
+
+        return $clones;
     }
 }

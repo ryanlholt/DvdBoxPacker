@@ -1,6 +1,10 @@
 # Changelog
 
 ## [4.x - Unreleased] - 2026-xx-xx
+### Added
+- An opt-in short-circuit optimisation (`Packer::setQuantityShortCircuit()`) that dramatically speeds up packing large
+  quantities of identical items by bounding the work per box evaluation and replicating identical boxes rather than
+  re-solving them. Disabled by default; produces identical results to leaving it disabled
 
 ## [4.2.0] - 2026-07-05
 ### Added

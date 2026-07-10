@@ -274,4 +274,111 @@ class ItemList implements Countable, IteratorAggregate
     {
         return $this->linkedGroupCounts;
     }
+
+    /**
+     * Generate a value-based signature for an item. Two items sharing a signature are interchangeable for packing
+     * purposes - they have identical dimensions, weight and rotation constraints.
+     *
+     * @internal
+     */
+    public static function signatureOf(Item $item): string
+    {
+        return $item->getDescription() . '|' . $item->getWidth() . '|' . $item->getLength() . '|' . $item->getDepth() . '|' . $item->getWeight() . '|' . $item->getAllowedRotation()->value;
+    }
+
+    /**
+     * Get a map of item signature => [a representative item, count of items in this list with that signature].
+     * The representative item is used to recover the dimensions/weight for a signature without having to parse the
+     * (delimiter-unsafe) signature string.
+     *
+     * @internal
+     *
+     * @return array<string, array{item: Item, count: int}>
+     */
+    public function getSignatureData(): array
+    {
+        $data = [];
+        foreach ($this->list as $item) {
+            $signature = self::signatureOf($item);
+            if (isset($data[$signature])) {
+                ++$data[$signature]['count'];
+            } else {
+                $data[$signature] = ['item' => $item, 'count' => 1];
+            }
+        }
+
+        return $data;
+    }
+
+    /**
+     * Return a copy of this list containing at most $caps[signature] items of each signature. Used to bound the amount
+     * of work handed to the volume packer - a box can only ever hold so many copies of a given item type, so there is
+     * no point evaluating more than that regardless of the total quantity remaining to be packed.
+     *
+     * @internal
+     *
+     * @param array<string, int> $caps
+     */
+    public function cappedBySignature(array $caps): self
+    {
+        if (!$this->isSorted) {
+            usort($this->list, $this->sorter->compare(...));
+            $this->list = array_reverse($this->list); // internal sort is largest at the end
+            $this->isSorted = true;
+        }
+
+        $capped = new self($this->sorter);
+        $used = [];
+        foreach ($this->list as $item) {
+            $signature = self::signatureOf($item);
+            if (($used[$signature] ?? 0) < ($caps[$signature] ?? 0)) {
+                $used[$signature] = ($used[$signature] ?? 0) + 1;
+                $capped->list[] = $item;
+                if ($item instanceof LinkedItem) {
+                    $group = $item->getLinkedItemGroup();
+                    $capped->linkedGroupCounts[$group] = ($capped->linkedGroupCounts[$group] ?? 0) + 1;
+                }
+            }
+        }
+        $capped->isSorted = true;
+
+        return $capped;
+    }
+
+    /**
+     * Remove a fixed number of items of each given signature from this list. Used when an already-solved box is
+     * replicated multiple times - the items destined for those (identical) boxes are removed in bulk rather than
+     * re-running the packer once per box.
+     *
+     * @internal
+     *
+     * @param array<string, int> $toRemove signature => number of items to remove
+     */
+    public function removeBySignatureMultiset(array $toRemove): void
+    {
+        if (count($toRemove) === 0) {
+            return;
+        }
+
+        if (!$this->isSorted) {
+            usort($this->list, $this->sorter->compare(...));
+            $this->list = array_reverse($this->list); // internal sort is largest at the end
+            $this->isSorted = true;
+        }
+
+        $remaining = $toRemove;
+        foreach ($this->list as $key => $item) {
+            $signature = self::signatureOf($item);
+            if (($remaining[$signature] ?? 0) > 0) {
+                --$remaining[$signature];
+                unset($this->list[$key]);
+                if ($item instanceof LinkedItem) {
+                    $group = $item->getLinkedItemGroup();
+                    if (--$this->linkedGroupCounts[$group] === 0) {
+                        unset($this->linkedGroupCounts[$group]);
+                    }
+                }
+            }
+        }
+    }
 }
