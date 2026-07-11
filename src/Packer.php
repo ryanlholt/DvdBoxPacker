@@ -229,7 +229,7 @@ class Packer implements LoggerAwareInterface
             // Loop through boxes starting with smallest, see what happens
             foreach ($this->getBoxList($enforceSingleBox) as $box) {
                 $this->timeoutChecker?->throwOnTimeout();
-                $itemsForBox = $shortCircuit ? $this->itemsForBoxEvaluation($box, $signatureData) : $this->items;
+                $itemsForBox = $shortCircuit ? $this->itemsForBoxEvaluation($box, $this->items, $signatureData) : $this->items;
                 $volumePacker = new VolumePacker($box, $itemsForBox);
                 $volumePacker->setLogger($this->logger);
                 $volumePacker->beStrictAboutItemOrdering($this->beStrictAboutItemOrdering);
@@ -305,11 +305,22 @@ class Packer implements LoggerAwareInterface
                 continue;
             }
 
+            // Bound the work per box evaluation to what could physically fit. Only the per-type capping half of the
+            // short-circuit applies here - replicating identical boxes would collapse the exhaustive permutation
+            // search this method exists to perform. Capping does not change which boxes can be produced, so the set
+            // of permutations returned is unaffected.
+            $shortCircuit = $this->quantityShortCircuit
+                && !$this->beStrictAboutItemOrdering
+                && !$wipPermutation['itemsLeft']->hasConstrainedItems()
+                && !$wipPermutation['itemsLeft']->hasLinkedItems();
+            $signatureData = $shortCircuit ? $wipPermutation['itemsLeft']->getSignatureData() : [];
+
             $additionalPermutationsForThisPermutation = [];
             foreach ($this->boxes as $box) {
                 $this->timeoutChecker?->throwOnTimeout();
                 if ($remainingBoxQuantities[$box] > 0) {
-                    $volumePacker = new VolumePacker($box, $wipPermutation['itemsLeft']);
+                    $itemsForBox = $shortCircuit ? $this->itemsForBoxEvaluation($box, $wipPermutation['itemsLeft'], $signatureData) : $wipPermutation['itemsLeft'];
+                    $volumePacker = new VolumePacker($box, $itemsForBox);
                     $volumePacker->setLogger($this->logger);
                     $volumePacker->beStrictAboutItemOrdering($this->beStrictAboutItemOrdering);
                     $packedBox = $volumePacker->pack();
@@ -393,9 +404,9 @@ class Packer implements LoggerAwareInterface
      * makes the cost of evaluating a box independent of the total quantity remaining to be packed. If no signature
      * needs capping for this box the full list is returned unchanged so behaviour is preserved exactly.
      *
-     * @param array<string, array{item: Item, count: int}> $signatureData
+     * @param array<string, array{item: Item, count: int}> $signatureData signature data derived from $items
      */
-    private function itemsForBoxEvaluation(Box $box, array $signatureData): ItemList
+    private function itemsForBoxEvaluation(Box $box, ItemList $items, array $signatureData): ItemList
     {
         $innerVolume = $box->getInnerWidth() * $box->getInnerLength() * $box->getInnerDepth();
         $netWeight = $box->getMaxWeight() - $box->getEmptyWeight();
@@ -419,10 +430,10 @@ class Packer implements LoggerAwareInterface
         }
 
         if (!$needsCap) {
-            return $this->items;
+            return $items;
         }
 
-        return $this->items->cappedBySignature($caps);
+        return $items->cappedBySignature($caps);
     }
 
     /**

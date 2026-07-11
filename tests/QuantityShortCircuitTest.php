@@ -202,20 +202,7 @@ class QuantityShortCircuitTest extends TestCase
 
         $boxSignatures = [];
         foreach ($packedBoxes as $packedBox) {
-            $itemSignatures = [];
-            foreach ($packedBox->items as $packedItem) {
-                $itemSignatures[] = implode(':', [
-                    $packedItem->item->getDescription(),
-                    $packedItem->x,
-                    $packedItem->y,
-                    $packedItem->z,
-                    $packedItem->width,
-                    $packedItem->length,
-                    $packedItem->depth,
-                ]);
-            }
-            sort($itemSignatures);
-            $boxSignatures[] = $packedBox->box->getReference() . '#' . implode('|', $itemSignatures);
+            $boxSignatures[] = $this->boxSignature($packedBox);
         }
         sort($boxSignatures);
 
@@ -226,5 +213,78 @@ class QuantityShortCircuitTest extends TestCase
         sort($unpacked);
 
         return ['boxes' => $boxSignatures, 'unpacked' => $unpacked];
+    }
+
+    public function testPackAllPermutationsEquivalent(): void
+    {
+        // Two box sizes (4 vs 2 per box) so there are genuinely multiple permutations, and enough items that the
+        // per-type cap engages for both boxes. Capping must not change the set of permutations returned.
+        $boxes = [
+            new TestBox('Big', 100, 100, 100, 0, 100, 100, 100, 1000000),
+            new TestBox('Small', 100, 50, 100, 0, 100, 50, 100, 1000000),
+        ];
+        $item = new TestItem('Widget', 50, 50, 100, 100, Rotation::BestFit);
+
+        $off = $this->packAllPermutationsCanonical($boxes, [[$item, 6]], false);
+        $on = $this->packAllPermutationsCanonical($boxes, [[$item, 6]], true);
+
+        self::assertNotEmpty($off, 'Expected at least one permutation to exist');
+        self::assertSame($off, $on, 'Permutations differ between short-circuit off and on');
+    }
+
+    /**
+     * Run packAllPermutations() and return a canonical, order-independent representation of the full set of
+     * permutations so two runs can be compared directly.
+     *
+     * @param Box[]                         $boxes
+     * @param array<array{0: Item, 1: int}> $itemsWithQty
+     *
+     * @return string[]
+     */
+    private function packAllPermutationsCanonical(array $boxes, array $itemsWithQty, bool $shortCircuit): array
+    {
+        $packer = new Packer();
+        foreach ($boxes as $box) {
+            $packer->addBox($box);
+        }
+        foreach ($itemsWithQty as [$item, $qty]) {
+            $packer->addItem($item, $qty);
+        }
+        $packer->setQuantityShortCircuit($shortCircuit);
+
+        $canonicalPermutations = [];
+        foreach ($packer->packAllPermutations() as $permutation) {
+            $boxSignatures = [];
+            foreach ($permutation as $packedBox) {
+                $boxSignatures[] = $this->boxSignature($packedBox);
+            }
+            sort($boxSignatures);
+            $canonicalPermutations[] = implode(';;', $boxSignatures);
+        }
+        sort($canonicalPermutations);
+
+        return $canonicalPermutations;
+    }
+
+    /**
+     * A canonical, order-independent string for a single packed box: its reference plus every item's placement.
+     */
+    private function boxSignature(PackedBox $packedBox): string
+    {
+        $itemSignatures = [];
+        foreach ($packedBox->items as $packedItem) {
+            $itemSignatures[] = implode(':', [
+                $packedItem->item->getDescription(),
+                $packedItem->x,
+                $packedItem->y,
+                $packedItem->z,
+                $packedItem->width,
+                $packedItem->length,
+                $packedItem->depth,
+            ]);
+        }
+        sort($itemSignatures);
+
+        return $packedBox->box->getReference() . '#' . implode('|', $itemSignatures);
     }
 }
