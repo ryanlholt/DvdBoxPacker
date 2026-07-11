@@ -13,6 +13,7 @@ Desktop.ini
 /vendor
 /docs/_build
 /docs/_static
+/docs/epics
 node_modules
 
 /composer.lock
