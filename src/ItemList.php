@@ -22,6 +22,7 @@ use function current;
 use function end;
 use function key;
 use function prev;
+use function strlen;
 use function usort;
 
 /**
@@ -199,17 +200,24 @@ class ItemList implements Countable, IteratorAggregate
      * Generate a value-based signature for an item. Two items sharing a signature are interchangeable for packing
      * purposes - they have identical dimensions, weight and rotation constraints.
      *
+     * The description is length-prefixed (strlen($description) . ':' . $description) before being joined with the
+     * remaining fields using '|'. Width/length/depth/weight are ints and keepFlat is bool, so none of them can ever
+     * contain '|' - only the description is free-form text, and the length prefix pins down exactly where it ends
+     * regardless of what characters it contains, making the signature collision-free for any description.
+     *
      * @internal
      */
     public static function signatureOf(Item $item): string
     {
-        return $item->getDescription() . '|' . $item->getWidth() . '|' . $item->getLength() . '|' . $item->getDepth() . '|' . $item->getWeight() . '|' . ($item->getKeepFlat() ? '1' : '0');
+        $description = $item->getDescription();
+
+        return strlen($description) . ':' . $description . '|' . $item->getWidth() . '|' . $item->getLength() . '|' . $item->getDepth() . '|' . $item->getWeight() . '|' . ($item->getKeepFlat() ? '1' : '0');
     }
 
     /**
      * Get a map of item signature => [a representative item, count of items in this list with that signature].
      * The representative item is used to recover the dimensions/weight for a signature without having to parse the
-     * (delimiter-unsafe) signature string.
+     * signature string.
      *
      * @internal
      *
