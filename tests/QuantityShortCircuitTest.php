@@ -30,6 +30,8 @@ use function str_starts_with;
  */
 class QuantityShortCircuitTest extends TestCase
 {
+    use ShortCircuitEquivalenceTrait;
+
     protected function setUp(): void
     {
         // ConstrainedPlacementByCountTestItem::$limit is a static, so reset it to its class default before every
@@ -176,6 +178,43 @@ class QuantityShortCircuitTest extends TestCase
         $this->assertEquivalent([$box], $items, beStrictAboutItemOrdering: true);
     }
 
+    public function testEquivalentWhenPerBoxCapacityIsBelowLookaheadDepth(): void
+    {
+        // Regression test for story 4.2 (docs/epics/stories/4.2-randomised-differential-harness.md), pinning the
+        // *capping* half of the lookahead divergence the randomised harness found and the capacity+LOOKAHEAD_DEPTH
+        // headroom in Packer::itemsForBoxEvaluation() now fixes.
+        //
+        // This box holds only 6 'Big' items by weight (netWeight 2548 / weight 416 = 6) - below the 8-item lookahead
+        // depth used by OrientatedItemSorter - while 11 copies are available. With the old cap-at-capacity behaviour
+        // the short-circuit handed the volume packer only 6 copies, so its forward-looking topN(8) window was shorter
+        // than the uncapped run's; that changed a KeepFlat rotation on some copies and diverged the placements. The
+        // headroom fix hands capacity + 8 copies, restoring an identical window. Minimised from a fuzzer failure
+        // (seed 20260711); it diverges without the fix and is identical with it.
+        $box = new TestBox('Box', 18, 21, 1, 0, 18, 21, 1, 2548);
+        $big = new TestItem('Big', 4, 9, 1, 416, Rotation::KeepFlat); // 6 per box by weight
+
+        $this->assertEquivalent([$box], [[$big, 11]]);
+    }
+
+    public function testEquivalentWhenReplicationWouldOutrunDepletedPool(): void
+    {
+        // Regression test for the *replication* half of the story 4.2 divergence, distinct from the capping issue
+        // above: here nothing is capped (capacity 3 + LOOKAHEAD_DEPTH 8 = 11 = the available quantity, so
+        // Packer::itemsForBoxEvaluation() is a no-op and each box evaluation is byte-for-byte the uncapped one).
+        // Replication used to clone the first solved box for every further full boxful, but independently solving a
+        // later boxful from a depleted pool (here the third boxful, packed from 5 remaining copies rather than 11)
+        // picks a different orientation once its lookahead window shrinks. replicateIdenticalBoxes() now only clones
+        // while the replaced iteration's pool provably stays above maxCapacity + LOOKAHEAD_DEPTH per constituent
+        // signature - in this scenario that means no clones at all, and every box is solved by the normal loop.
+        //
+        // Box holds 3 'Widget' by weight (netWeight 4280 / weight 1151 = 3); 11 copies -> boxes of 3,3,3,2. Without
+        // the replication guard, the third full box diverges from the cloned template.
+        $box = new TestBox('Box', 68, 74, 40, 0, 68, 74, 40, 4280);
+        $widget = new TestItem('Widget', 33, 30, 22, 1151, Rotation::BestFit); // 3 per box by weight
+
+        $this->assertEquivalent([$box], [[$widget, 11]]);
+    }
+
     #[Group('efficiency')]
     public function testLargeQuantityIsHandledQuickly(): void
     {
@@ -265,19 +304,7 @@ class QuantityShortCircuitTest extends TestCase
 
         $packedBoxes = $packer->pack();
 
-        $boxSignatures = [];
-        foreach ($packedBoxes as $packedBox) {
-            $boxSignatures[] = $this->boxSignature($packedBox);
-        }
-        sort($boxSignatures);
-
-        $unpacked = [];
-        foreach ($packer->getUnpackedItems() as $item) {
-            $unpacked[] = $item->getDescription();
-        }
-        sort($unpacked);
-
-        return ['boxes' => $boxSignatures, 'unpacked' => $unpacked];
+        return $this->canonicalPackingResult($packedBoxes, $packer->getUnpackedItems());
     }
 
     public function testPackAllPermutationsEquivalent(): void
@@ -329,27 +356,5 @@ class QuantityShortCircuitTest extends TestCase
         sort($canonicalPermutations);
 
         return $canonicalPermutations;
-    }
-
-    /**
-     * A canonical, order-independent string for a single packed box: its reference plus every item's placement.
-     */
-    private function boxSignature(PackedBox $packedBox): string
-    {
-        $itemSignatures = [];
-        foreach ($packedBox->items as $packedItem) {
-            $itemSignatures[] = implode(':', [
-                $packedItem->item->getDescription(),
-                $packedItem->x,
-                $packedItem->y,
-                $packedItem->z,
-                $packedItem->width,
-                $packedItem->length,
-                $packedItem->depth,
-            ]);
-        }
-        sort($itemSignatures);
-
-        return $packedBox->box->getReference() . '#' . implode('|', $itemSignatures);
     }
 }

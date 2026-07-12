@@ -6,6 +6,15 @@
   quantities of identical items by bounding the work per box evaluation and replicating identical boxes rather than
   re-solving them. Disabled by default; produces identical results to leaving it disabled
 
+### Fixed
+- Later boxes in a multi-box packing could be packed suboptimally once every item with `Rotation::Never` (or with
+  constrained placement) had been packed into earlier boxes - the remaining-item list cached those properties and did
+  not recompute them after removals, so subsequent boxes skipped trying the rotated box orientation (or skipped layer
+  stabilisation) unnecessarily
+- Orientation selection could be influenced by how many items remained beyond the 8-item lookahead window, and by
+  lookahead results cached from earlier packings in the same process - the cached score embedded the total remaining
+  item count rather than scoring only the window it was computed from
+
 ## [4.2.0] - 2026-07-05
 ### Added
 - A mechanism to allow forcing certain items to be packed together [RubenKluft]

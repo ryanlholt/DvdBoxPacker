@@ -49,6 +49,17 @@ class Packer implements LoggerAwareInterface
 
     protected bool $quantityShortCircuit = false;
 
+    /**
+     * Headroom, in copies per signature, added on top of a box's physical capacity when bounding the item list handed
+     * to a single box evaluation (see itemsForBoxEvaluation()). Orientation choice consults a forward-looking window
+     * over the next few items, so supplying only `capacity` copies could change how a box packs versus the uncapped
+     * run; supplying `capacity` + this headroom guarantees that window is always identical to the uncapped run.
+     *
+     * MUST be kept equal to (or greater than) the topN() lookahead depth used in
+     * OrientatedItemSorter::calculateAdditionalItemsPackedWithThisOrientation().
+     */
+    private const LOOKAHEAD_DEPTH = 8;
+
     private bool $beStrictAboutItemOrdering = false;
 
     protected ?TimeoutChecker $timeoutChecker = null;
@@ -399,32 +410,30 @@ class Packer implements LoggerAwareInterface
     /**
      * Bound the set of items handed to the volume packer for a single box evaluation.
      *
-     * A box can only ever hold a limited number of copies of each distinct item type (limited by volume, and by
-     * weight), so supplying more copies than that cannot change how the box packs. Supplying only that many, however,
-     * makes the cost of evaluating a box independent of the total quantity remaining to be packed. If no signature
-     * needs capping for this box the full list is returned unchanged so behaviour is preserved exactly.
+     * A box can only ever physically hold a limited number of copies of each distinct item type (limited by volume,
+     * and by weight). Supplying only that many copies is not quite safe, however: orientation choice consults a
+     * forward-looking window over the next up-to-LOOKAHEAD_DEPTH items (ItemList::topN(), driven by
+     * OrientatedItemSorter::calculateAdditionalItemsPackedWithThisOrientation()). If a signature's per-box capacity is
+     * below that depth while more copies remain in the pool, handing the packer only `capacity` copies would leave the
+     * lookahead window short of the copies the uncapped run sees, admitting different (smaller) items into it and
+     * potentially changing an orientation - and therefore the packed result.
+     *
+     * Supplying `capacity + LOOKAHEAD_DEPTH` copies closes that gap: at most `capacity` copies of a signature can ever
+     * be placed in the box, so at every placement decision at least LOOKAHEAD_DEPTH copies of each still-surplus
+     * signature remain available to fill the window exactly as the uncapped run would, while the cost of evaluating a
+     * box stays independent of the total quantity remaining to be packed. If no signature needs capping for this box
+     * the full list is returned unchanged so behaviour is preserved exactly.
      *
      * @param array<string, array{item: Item, count: int}> $signatureData signature data derived from $items
      */
     private function itemsForBoxEvaluation(Box $box, ItemList $items, array $signatureData): ItemList
     {
-        $innerVolume = $box->getInnerWidth() * $box->getInnerLength() * $box->getInnerDepth();
-        $netWeight = $box->getMaxWeight() - $box->getEmptyWeight();
-
         $caps = [];
         $needsCap = false;
         foreach ($signatureData as $signature => $data) {
-            $item = $data['item'];
-            $unitVolume = max($item->getWidth() * $item->getLength() * $item->getDepth(), 1);
-            $capacity = intdiv($innerVolume, $unitVolume);
-            if ($item->getWeight() > 0) {
-                $capacity = min($capacity, intdiv($netWeight, $item->getWeight()));
-            }
-            if ($capacity < 0) {
-                $capacity = 0;
-            }
-            $caps[$signature] = $capacity;
-            if ($capacity < $data['count']) {
+            $cap = $this->perBoxCapacity($box, $data['item']) + self::LOOKAHEAD_DEPTH;
+            $caps[$signature] = $cap;
+            if ($cap < $data['count']) {
                 $needsCap = true;
             }
         }
@@ -437,13 +446,39 @@ class Packer implements LoggerAwareInterface
     }
 
     /**
-     * Given a box that has just been packed and removed from the pool, produce as many identical copies of it as the
-     * remaining items and box stock allow.
+     * Upper bound on how many copies of an item a box could ever hold, by volume and by weight. The real geometric
+     * limit may be lower, never higher.
+     */
+    private function perBoxCapacity(Box $box, Item $item): int
+    {
+        $innerVolume = $box->getInnerWidth() * $box->getInnerLength() * $box->getInnerDepth();
+        $unitVolume = max($item->getWidth() * $item->getLength() * $item->getDepth(), 1);
+        $capacity = intdiv($innerVolume, $unitVolume);
+        if ($item->getWeight() > 0) {
+            $capacity = min($capacity, intdiv($box->getMaxWeight() - $box->getEmptyWeight(), $item->getWeight()));
+        }
+
+        return max($capacity, 0);
+    }
+
+    /**
+     * Given a box that has just been packed and removed from the pool, produce as many identical copies of it as can
+     * be proven to match what the normal packing loop would have produced.
      *
-     * A copy can be made for every further boxful of each of its constituent item types present in the pool. The
-     * number of copies is the smallest such count across all item types, further limited by the remaining stock of
-     * this box type. At least one boxful of the limiting type is deliberately left behind so that the final (possibly
-     * partial) box is always solved by the normal packing loop rather than assumed to be full.
+     * A replica standing in for a later iteration is only valid if that iteration's evaluations would have been
+     * byte-for-byte the template's. Each box evaluation sees min(count, capacity + LOOKAHEAD_DEPTH) copies of each
+     * signature (itemsForBoxEvaluation), so an iteration whose pool still holds at least
+     * maxCapacityAcrossInStockBoxes + LOOKAHEAD_DEPTH copies of every constituent signature sees exactly the same
+     * capped list for every box type as the template's iteration did - the same winner with the same contents
+     * necessarily follows. Only the constituent signatures deplete between iterations, so replication may continue
+     * precisely while the pool the replaced iteration would have seen stays above that threshold; the remaining tail
+     * boxes (where windows genuinely shrink and a different orientation, or even a different box, may win) are always
+     * solved by the normal loop from the true pool, exactly as they would be with the optimisation disabled.
+     *
+     * (Residual theoretical caveat: two candidate boxes producing exactly equal item count, volume utilisation AND
+     * used volume tie in DefaultPackedBoxSorter and fall back to evaluation order, which can shift with pool volume
+     * via getBoxList()'s preferred/other partition. The randomised differential harness has not produced such a case;
+     * exotic custom PackedBoxSorters with coarser comparisons would widen it.)
      *
      * @return PackedBox[]
      */
@@ -464,11 +499,25 @@ class Packer implements LoggerAwareInterface
 
         $replications = $this->boxQuantitiesAvailable[$template->box];
         foreach ($boxCounts as $signature => $need) {
-            $have = $poolData[$signature]['count'] ?? 0;
-            if ($have <= $need) {
-                return []; // one boxful or fewer remains; leave it for the normal loop
+            $data = $poolData[$signature] ?? null;
+            if ($data === null) {
+                return [];
             }
-            $possible = intdiv($have - $need - 1, $need) + 1;
+
+            $maxCapacity = 0;
+            foreach ($this->boxes as $box) {
+                if ($this->boxQuantitiesAvailable[$box] > 0) {
+                    $maxCapacity = max($maxCapacity, $this->perBoxCapacity($box, $data['item']));
+                }
+            }
+
+            // The k-th replica replaces an iteration whose pool holds $have - (k-1) * $need copies; that pool must
+            // stay at or above the threshold for the replica to be provably identical to a real solve.
+            $mustRemain = $maxCapacity + self::LOOKAHEAD_DEPTH;
+            if ($data['count'] < $mustRemain) {
+                return [];
+            }
+            $possible = intdiv($data['count'] - $mustRemain, $need) + 1;
             if ($possible < $replications) {
                 $replications = $possible;
             }

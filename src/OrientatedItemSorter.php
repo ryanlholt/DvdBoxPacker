@@ -145,6 +145,8 @@ class OrientatedItemSorter
         }
 
         if (!isset(static::$lookaheadCache[$cacheKey])) {
+            $lookaheadWindowSize = $itemsToPack->count();
+
             $tempBox = new WorkingVolume($this->widthLeft - $prevItem->width, $currentRowLength, $this->depthLeft, PHP_INT_MAX);
             $tempPacker = new VolumePacker($tempBox, $itemsToPack);
             $tempPacker->setSinglePassMode(true);
@@ -159,7 +161,12 @@ class OrientatedItemSorter
 
             $itemsToPack->removePackedItems($nextRowsPacked->items);
 
-            $packedCount = $this->nextItems->count() - $itemsToPack->count();
+            // Score how many of the window's items were packed. The window is fully described by the cache key; the
+            // total size of the list it was drawn from must not leak into the cached value, both so that cache hits
+            // computed at a different point in the packing (or in a different packing altogether - the cache is
+            // process-global) compare correctly against freshly-computed scores, and so that the score does not
+            // depend on how many items beyond the lookahead window happen to remain.
+            $packedCount = $lookaheadWindowSize - $itemsToPack->count();
             $this->logger->debug('Lookahead with orientation', ['packedCount' => $packedCount, 'orientatedItem' => $prevItem]);
 
             static::$lookaheadCache[$cacheKey] = $packedCount;

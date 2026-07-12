@@ -119,6 +119,7 @@ class ItemList implements Countable, IteratorAggregate
                         unset($this->linkedGroupCounts[$group]);
                     }
                 }
+                $this->invalidateCachedPredicatesAfterRemoval();
 
                 return;
             }
@@ -143,6 +144,23 @@ class ItemList implements Countable, IteratorAggregate
                 }
             } while (prev($this->list) !== false);
         }
+        $this->invalidateCachedPredicatesAfterRemoval();
+    }
+
+    /**
+     * The cached hasConstrainedItems/hasNoRotationItems predicates are maintained on insert, but a removal may take
+     * out the last constrained/unrotatable item, so a cached `true` can no longer be trusted afterwards and must be
+     * recomputed on next access. A cached `false` stays correct - removals cannot add items - and is kept to avoid
+     * needless rescans.
+     */
+    private function invalidateCachedPredicatesAfterRemoval(): void
+    {
+        if ($this->hasConstrainedItems === true) {
+            $this->hasConstrainedItems = null;
+        }
+        if ($this->hasNoRotationItems === true) {
+            $this->hasNoRotationItems = null;
+        }
     }
 
     /**
@@ -156,7 +174,10 @@ class ItemList implements Countable, IteratorAggregate
             $this->isSorted = true;
         }
 
-        return array_pop($this->list);
+        $item = array_pop($this->list);
+        $this->invalidateCachedPredicatesAfterRemoval();
+
+        return $item;
     }
 
     /**
@@ -389,5 +410,6 @@ class ItemList implements Countable, IteratorAggregate
                 }
             }
         }
+        $this->invalidateCachedPredicatesAfterRemoval();
     }
 }
