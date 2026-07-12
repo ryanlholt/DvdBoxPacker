@@ -6,6 +6,14 @@
   quantities of identical items by bounding the work per box evaluation and replicating identical boxes rather than
   re-solving them. Disabled by default; produces identical results to leaving it disabled
 
+### Fixed
+- Later boxes in a multi-box packing could be packed suboptimally once every item requiring constrained placement had
+  been packed into earlier boxes - the remaining-item list cached that property and did not recompute it after
+  removals, so subsequent boxes skipped layer stabilisation or were needlessly treated as constrained
+- Orientation selection could be influenced by how many items remained beyond the 8-item lookahead window, and by
+  lookahead results cached from earlier packings in the same process - the cached score embedded the total remaining
+  item count rather than scoring only the window it was computed from
+
 ## [3.12.1] - 2023-12-02
 ### Fixed
 - Restored ability to copy/paste the samples from the docs into a non-dev installation

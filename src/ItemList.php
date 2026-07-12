@@ -44,7 +44,7 @@ class ItemList implements Countable, IteratorAggregate
      */
     private ?bool $hasConstrainedItems = null;
 
-    public function __construct(ItemSorter $sorter = null)
+    public function __construct(?ItemSorter $sorter = null)
     {
         $this->sorter = $sorter ?: new DefaultItemSorter();
     }
@@ -90,6 +90,7 @@ class ItemList implements Countable, IteratorAggregate
         do {
             if (current($this->list) === $item) {
                 unset($this->list[key($this->list)]);
+                $this->invalidateCachedPredicatesAfterRemoval();
 
                 return;
             }
@@ -108,6 +109,19 @@ class ItemList implements Countable, IteratorAggregate
                 }
             } while (prev($this->list) !== false);
         }
+        $this->invalidateCachedPredicatesAfterRemoval();
+    }
+
+    /**
+     * The cached hasConstrainedItems predicate is maintained on insert, but a removal may take out the last
+     * constrained item, so a cached `true` can no longer be trusted afterwards and must be recomputed on next
+     * access. A cached `false` stays correct - removals cannot add items - and is kept to avoid needless rescans.
+     */
+    private function invalidateCachedPredicatesAfterRemoval(): void
+    {
+        if ($this->hasConstrainedItems === true) {
+            $this->hasConstrainedItems = null;
+        }
     }
 
     /**
@@ -121,7 +135,10 @@ class ItemList implements Countable, IteratorAggregate
             $this->isSorted = true;
         }
 
-        return array_pop($this->list);
+        $item = array_pop($this->list);
+        $this->invalidateCachedPredicatesAfterRemoval();
+
+        return $item;
     }
 
     /**
@@ -298,5 +315,6 @@ class ItemList implements Countable, IteratorAggregate
                 unset($this->list[$key]);
             }
         }
+        $this->invalidateCachedPredicatesAfterRemoval();
     }
 }

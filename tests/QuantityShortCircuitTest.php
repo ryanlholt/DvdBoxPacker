@@ -16,8 +16,6 @@ use DVDoug\BoxPacker\Test\TestItem;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\AbstractLogger;
 
-use function implode;
-use function sort;
 use function strpos;
 
 /**
@@ -27,6 +25,8 @@ use function strpos;
  */
 class QuantityShortCircuitTest extends TestCase
 {
+    use ShortCircuitEquivalenceTrait;
+
     protected function setUp(): void
     {
         // ConstrainedPlacementByCountTestItem::$limit and ConstrainedTestItem::$limit are statics, so reset them to
@@ -176,6 +176,49 @@ class QuantityShortCircuitTest extends TestCase
         $this->assertEquivalent([$box], $items, true);
     }
 
+    public function testEquivalentWhenPerBoxCapacityIsBelowLookaheadDepth(): void
+    {
+        // Regression test pinning the *capping* half of the lookahead divergence, fixed by the
+        // capacity+LOOKAHEAD_DEPTH headroom in Packer::itemsForBoxEvaluation().
+        //
+        // The equivalent fixture ported directly from the 4.x branch (a different box/item pairing) does not
+        // reproduce a divergence on this branch's packing engine when run pre-fix, so this fixture was instead
+        // minimised from a 3.x-native divergence found by running QuantityShortCircuitFuzzTest against the
+        // pre-fix source (seed 20260711, iteration 137 of the default run): reduced from a 2-box/60-qty scenario
+        // down to a single box and a quantity of 7.
+        //
+        // This box holds only 4 'Big' items by weight (netWeight 5750 / weight 1300 = 4) - below the 8-item lookahead
+        // depth used by OrientatedItemSorter - while 7 copies are available. With the old cap-at-capacity behaviour
+        // (no headroom at all) the short-circuit handed the volume packer only 4 copies, so its forward-looking
+        // topN(8) window saw 4 items instead of the uncapped run's 7; that changed the chosen orientation and
+        // diverged the placements. The headroom fix hands capacity + 8 copies (comfortably above the available 7),
+        // restoring an identical window. Diverges without the fix and is identical with it (verified directly
+        // against this branch, not just ported from 4.x).
+        $box = new TestBox('Box', 154, 85, 149, 22, 154, 85, 149, 5772);
+        $big = new TestItem('Big', 56, 40, 70, 1300, Rotation::BestFit); // 4 per box by weight
+
+        $this->assertEquivalent([$box], [[$big, 7]]);
+    }
+
+    public function testEquivalentWhenReplicationWouldOutrunDepletedPool(): void
+    {
+        // Regression test for the *replication* half of the divergence found by the fuzz harness, distinct from the
+        // capping issue above: here nothing is capped (capacity 3 + LOOKAHEAD_DEPTH 8 = 11 = the available quantity,
+        // so Packer::itemsForBoxEvaluation() is a no-op and each box evaluation is byte-for-byte the uncapped one).
+        // Replication used to clone the first solved box for every further full boxful, but independently solving a
+        // later boxful from a depleted pool (here the third boxful, packed from 5 remaining copies rather than 11)
+        // picks a different orientation once its lookahead window shrinks. replicateIdenticalBoxes() now only clones
+        // while the replaced iteration's pool provably stays above maxCapacity + LOOKAHEAD_DEPTH per constituent
+        // signature - in this scenario that means no clones at all, and every box is solved by the normal loop.
+        //
+        // Box holds 3 'Widget' by weight (netWeight 4280 / weight 1151 = 3); 11 copies -> boxes of 3,3,3,2. Without
+        // the replication guard, the third full box diverges from the cloned template.
+        $box = new TestBox('Box', 68, 74, 40, 0, 68, 74, 40, 4280);
+        $widget = new TestItem('Widget', 33, 30, 22, 1151, Rotation::BestFit); // 3 per box by weight
+
+        $this->assertEquivalent([$box], [[$widget, 11]]);
+    }
+
     /**
      * @group efficiency
      */
@@ -241,14 +284,15 @@ class QuantityShortCircuitTest extends TestCase
         $off = $this->pack($boxes, $itemsWithQty, false, $beStrictAboutItemOrdering);
         $on = $this->pack($boxes, $itemsWithQty, true, $beStrictAboutItemOrdering);
 
-        self::assertSame($off, $on, 'Packed boxes differ between short-circuit off and on');
+        self::assertSame($off['boxes'], $on['boxes'], 'Packed boxes differ between short-circuit off and on');
+        self::assertSame($off['unpacked'], $on['unpacked'], 'Unpacked items differ between short-circuit off and on');
     }
 
     /**
      * @param Box[]                         $boxes
      * @param array<array{0: Item, 1: int}> $itemsWithQty
      *
-     * @return string[]
+     * @return array{boxes: string[], unpacked: string[]}
      */
     private function pack(array $boxes, array $itemsWithQty, bool $shortCircuit, bool $beStrictAboutItemOrdering): array
     {
@@ -264,25 +308,6 @@ class QuantityShortCircuitTest extends TestCase
 
         $packedBoxes = $packer->pack();
 
-        $boxSignatures = [];
-        foreach ($packedBoxes as $packedBox) {
-            $itemSignatures = [];
-            foreach ($packedBox->getItems() as $packedItem) {
-                $itemSignatures[] = implode(':', [
-                    $packedItem->getItem()->getDescription(),
-                    $packedItem->getX(),
-                    $packedItem->getY(),
-                    $packedItem->getZ(),
-                    $packedItem->getWidth(),
-                    $packedItem->getLength(),
-                    $packedItem->getDepth(),
-                ]);
-            }
-            sort($itemSignatures);
-            $boxSignatures[] = $packedBox->getBox()->getReference() . '#' . implode('|', $itemSignatures);
-        }
-        sort($boxSignatures);
-
-        return $boxSignatures;
+        return $this->canonicalPackingResult($packedBoxes, new ItemList());
     }
 }
