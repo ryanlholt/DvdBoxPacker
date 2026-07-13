@@ -15,6 +15,7 @@ use Psr\Log\NullLogger;
 use SplObjectStorage;
 
 use function count;
+use function get_class;
 use function intdiv;
 use function max;
 use function min;
@@ -161,7 +162,8 @@ class Packer implements LoggerAwareInterface
      * resulting set of boxes is identical to packing with it disabled.
      *
      * Disabled by default. Has no effect when items require constrained placement or when strict item ordering has
-     * been requested - in those cases packing proceeds exactly as if it were disabled.
+     * been requested - in those cases packing proceeds exactly as if it were disabled. When a custom PackedBoxSorter
+     * is configured, per-box item capping still applies but identical-box replication is disabled.
      */
     public function setQuantityShortCircuit(bool $quantityShortCircuit): void
     {
@@ -374,15 +376,22 @@ class Packer implements LoggerAwareInterface
      * boxes (where windows genuinely shrink and a different orientation, or even a different box, may win) are always
      * solved by the normal loop from the true pool, exactly as they would be with the optimisation disabled.
      *
-     * (Residual theoretical caveat: two candidate boxes producing exactly equal item count, volume utilisation AND
-     * used volume tie in DefaultPackedBoxSorter and fall back to evaluation order, which can shift with pool volume
-     * via getBoxList()'s preferred/other partition. The randomised differential harness has not produced such a case;
-     * exotic custom PackedBoxSorters with coarser comparisons would widen it.)
+     * Replication is restricted to the exact built-in DefaultPackedBoxSorter. A custom sorter (including a subclass)
+     * may tie candidates that the default sorter distinguishes, making the winner depend on getBoxList()'s
+     * pool-dependent evaluation order. Per-box item capping remains safe and enabled with custom sorters.
+     *
+     * Even the default sorter can tie unequal-volume boxes because volume utilisation is rounded. Replication must
+     * therefore also stop before the shrinking item pool would move another box into getBoxList()'s preferred
+     * partition and change the evaluation order used to resolve that tie.
      *
      * @return PackedBox[]
      */
     private function replicateIdenticalBoxes(PackedBox $template): array
     {
+        if (get_class($this->packedBoxSorter) !== DefaultPackedBoxSorter::class) {
+            return [];
+        }
+
         $box = $template->getBox();
         $perBox = $template->getItems()->count();
         if ($perBox === 0 || $this->boxQuantitiesAvailable[$box] <= 0) {
@@ -398,6 +407,37 @@ class Packer implements LoggerAwareInterface
         $poolData = $this->items->getSignatureData();
 
         $replications = $this->boxQuantitiesAvailable[$box];
+
+        $poolVolume = 0;
+        foreach ($poolData as $data) {
+            $item = $data['item'];
+            $poolVolume += $data['count'] * $item->getWidth() * $item->getLength() * $item->getDepth();
+        }
+        $templateVolume = $template->getItems()->getVolume();
+        $templateIterationVolume = $poolVolume + $templateVolume;
+
+        $largestNonPreferredBoxVolume = null;
+        foreach ($this->boxes as $candidateBox) {
+            if ($this->boxQuantitiesAvailable[$candidateBox] > 0) {
+                $boxVolume = $candidateBox->getInnerWidth() * $candidateBox->getInnerLength() * $candidateBox->getInnerDepth();
+                if ($boxVolume < $templateIterationVolume) {
+                    $largestNonPreferredBoxVolume = max($largestNonPreferredBoxVolume ?? 0, $boxVolume);
+                }
+            }
+        }
+
+        if ($largestNonPreferredBoxVolume !== null) {
+            if ($poolVolume <= $largestNonPreferredBoxVolume) {
+                return [];
+            }
+            if ($templateVolume > 0) {
+                $replications = min(
+                    $replications,
+                    intdiv($poolVolume - $largestNonPreferredBoxVolume - 1, $templateVolume) + 1
+                );
+            }
+        }
+
         foreach ($boxCounts as $signature => $need) {
             $data = $poolData[$signature] ?? null;
             if ($data === null) {

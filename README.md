@@ -9,6 +9,14 @@ even just want to know the right number of labels to print.
 
 See [documentation](https://boxpacker.io/) for more details.
 
+Large quantity optimisation
+---------------------------
+`Packer::setQuantityShortCircuit(true)` enables an opt-in optimisation for large quantities of identical items. It
+bounds the items evaluated for each box and, when using the exact built-in `DefaultPackedBoxSorter`, can replicate a
+previously solved box instead of solving it again. With any custom `PackedBoxSorter` (including subclasses of the
+default), safe per-box item capping remains enabled but identical-box replication is disabled because custom sorting
+can make the selected box depend on per-iteration evaluation order.
+
 [![Build Status](https://github.com/dvdoug/BoxPacker/workflows/CI/badge.svg?branch=3.x)](https://github.com/dvdoug/BoxPacker/actions?query=workflow%3ACI+branch%3A3.x)
 [![Scrutinizer Code Quality](https://scrutinizer-ci.com/g/dvdoug/BoxPacker/badges/quality-score.png?b=3.x)](https://scrutinizer-ci.com/g/dvdoug/BoxPacker/?branch=3.x)
 [![Download count](https://img.shields.io/packagist/dt/dvdoug/boxpacker.svg)](https://packagist.org/packages/dvdoug/boxpacker)
