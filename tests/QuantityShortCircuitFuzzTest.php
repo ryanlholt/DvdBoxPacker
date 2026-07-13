@@ -60,8 +60,12 @@ use const STDERR;
  *      different orientation once its lookahead window shrinks. Replication is now guarded to only clone while the
  *      replaced iteration's pool provably stays above maxCapacity + LOOKAHEAD_DEPTH per constituent signature (pinned
  *      by QuantityShortCircuitTest::testEquivalentWhenReplicationWouldOutrunDepletedPool()).
+ *   3. Box selection can depend on getBoxList()'s pool-dependent evaluation order. Replication is disabled for custom
+ *      sorters, and the built-in sorter is protected by a volume-partition floor because rounded utilisation can tie
+ *      unequal-volume boxes (pinned by QuantityShortCircuitTest::testCustomPackedBoxSorterDisablesReplication() and
+ *      QuantityShortCircuitTest::testDefaultSorterRoundingTieDoesNotCrossBoxPreferenceBoundary()).
  *
- * With both fixes in place this harness is a hard regression guard: any observed divergence fails the build and
+ * With these fixes in place this harness is a hard regression guard: any observed divergence fails the build and
  * prints a fully reconstructable repro.
  *
  * @phpstan-type BoxSpec array{reference: string, w: int, l: int, d: int, emptyWeight: int, maxWeight: int, limit: int|null}

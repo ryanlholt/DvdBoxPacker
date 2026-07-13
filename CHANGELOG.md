@@ -4,7 +4,9 @@
 ### Added
 - An opt-in short-circuit optimisation (`Packer::setQuantityShortCircuit()`) that dramatically speeds up packing large
   quantities of identical items by bounding the work per box evaluation and replicating identical boxes rather than
-  re-solving them. Disabled by default; produces identical results to leaving it disabled
+  re-solving them. Disabled by default; produces identical results to leaving it disabled. Custom `PackedBoxSorter`
+  implementations still receive per-box item capping, but identical-box replication is restricted to the exact
+  built-in `DefaultPackedBoxSorter`
 
 ### Fixed
 - Later boxes in a multi-box packing could be packed suboptimally once every item with `Rotation::Never` (or with

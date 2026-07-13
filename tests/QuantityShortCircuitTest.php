@@ -215,6 +215,154 @@ class QuantityShortCircuitTest extends TestCase
         $this->assertEquivalent([$box], [[$widget, 11]]);
     }
 
+    public function testCustomPackedBoxSorterDisablesReplication(): void
+    {
+        // A custom sorter may tie candidates that the default sorter distinguishes. Because getBoxList() changes
+        // evaluation order as the remaining pool shrinks, cloning the previously selected box can then diverge from
+        // a real solve. A subclass is used deliberately: only the exact built-in sorter is eligible for replication.
+        $boxes = [
+            new TestBox('Small', 1, 1, 9, 0, 1, 1, 9, 10),
+            new TestBox('Large', 1, 1, 10, 0, 1, 1, 10, 10),
+        ];
+        $item = new TestItem('Item', 1, 1, 1, 10, Rotation::BestFit);
+        $noPreferenceSorter = new class extends DefaultPackedBoxSorter {
+            public function compare(PackedBox $boxA, PackedBox $boxB): int
+            {
+                return 0;
+            }
+        };
+
+        $this->assertEquivalent($boxes, [[$item, 13]], sorter: $noPreferenceSorter);
+
+        $packingIterations = new class extends AbstractLogger {
+            public int $count = 0;
+
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                if ((string) $message === 'Determining box search pattern') {
+                    ++$this->count;
+                }
+            }
+        };
+        $packer = new Packer(packedBoxSorter: $noPreferenceSorter, logger: $packingIterations);
+        foreach ($boxes as $box) {
+            $packer->addBox($box);
+        }
+        $packer->addItem($item, 13);
+        $packer->setQuantityShortCircuit(true);
+
+        $packedBoxes = $packer->pack();
+
+        self::assertSame($packedBoxes->count(), $packingIterations->count, 'Every custom-sorter box must be solved by a real packing iteration');
+    }
+
+    public function testDefaultSorterRoundingTieDoesNotCrossBoxPreferenceBoundary(): void
+    {
+        $boxes = [
+            new TestBox('BoxA', 10, 12, 247, 0, 10, 12, 247, 20),
+            new TestBox('BoxB', 30, 20, 50, 0, 30, 20, 50, 20),
+        ];
+        $item = new TestItem('Widget', 10, 10, 10, 10, Rotation::BestFit);
+
+        $this->assertEquivalent($boxes, [[$item, 40]]);
+
+        $packingIterations = new class extends AbstractLogger {
+            public int $count = 0;
+
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                if ((string) $message === 'Determining box search pattern') {
+                    ++$this->count;
+                }
+            }
+        };
+        $packer = new Packer(logger: $packingIterations);
+        foreach ($boxes as $box) {
+            $packer->addBox($box);
+        }
+        $packer->addItem($item, 40);
+        $packer->setMaxBoxesToBalanceWeight(0);
+        $packer->setQuantityShortCircuit(true);
+
+        self::assertCount(20, $packer->pack());
+        self::assertSame(7, $packingIterations->count, 'Replication should stop at, but not before, the box-preference boundary');
+    }
+
+    public function testReplicationStopsWhenPoolVolumeEqualsNonPreferredBoxVolume(): void
+    {
+        $packingIterations = new class extends AbstractLogger {
+            public int $count = 0;
+
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                if ((string) $message === 'Determining box search pattern') {
+                    ++$this->count;
+                }
+            }
+        };
+        $packer = new Packer(logger: $packingIterations);
+        $packer->addBox(new TestBox('Box', 1, 1, 10, 0, 1, 1, 10, 10));
+        $packer->addItem(new TestItem('Item', 1, 1, 1, 10, Rotation::BestFit), 11);
+        $packer->setMaxBoxesToBalanceWeight(0);
+        $packer->setQuantityShortCircuit(true);
+
+        self::assertCount(11, $packer->pack());
+        self::assertSame(10, $packingIterations->count, 'No replica may replace an iteration at the promotion boundary');
+    }
+
+    public function testZeroVolumeTemplateHasNoArtificialVolumeLimit(): void
+    {
+        $packingIterations = new class extends AbstractLogger {
+            public int $count = 0;
+
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                if ((string) $message === 'Determining box search pattern') {
+                    ++$this->count;
+                }
+            }
+        };
+        $packer = new Packer(logger: $packingIterations);
+        $packer->addBox(new TestBox('Box', 5, 5, 5, 0, 5, 5, 5, 10));
+        $packer->addItem(new TestItem('ZeroVol', 0, 1, 1, 5, Rotation::BestFit), 1000);
+        $packer->addItem(new TestItem('TooLarge', 6, 6, 6, 1, Rotation::BestFit));
+        $packer->setMaxBoxesToBalanceWeight(0);
+        $packer->setQuantityShortCircuit(true);
+        $packer->throwOnUnpackableItem(false);
+
+        self::assertCount(500, $packer->pack());
+        self::assertCount(1, $packer->getUnpackedItems());
+        self::assertSame(6, $packingIterations->count, 'Zero-volume templates must not receive an artificial volume-derived cap');
+    }
+
+    #[Group('efficiency')]
+    public function testWeightLimitedLargeQuantityStillReplicatesWithDefaultSorter(): void
+    {
+        $box = new TestBox('Box', 1000, 1000, 1000, 0, 1000, 1000, 1000, 10);
+        $item = new TestItem('Heavy', 1, 1, 1, 10, Rotation::BestFit); // 1 per box by weight
+
+        $boxEvaluations = new class extends AbstractLogger {
+            public int $count = 0;
+
+            public function log($level, string|Stringable $message, array $context = []): void
+            {
+                if (str_starts_with((string) $message, '[EVALUATING BOX]')) {
+                    ++$this->count;
+                }
+            }
+        };
+
+        $packer = new Packer();
+        $packer->addBox($box);
+        $packer->addItem($item, 1000);
+        $packer->setMaxBoxesToBalanceWeight(0);
+        $packer->setQuantityShortCircuit(true);
+        $packer->setLogger($boxEvaluations);
+
+        self::assertCount(1000, $packer->pack());
+        self::assertLessThanOrEqual(10, $boxEvaluations->count, 'Default-sorter replication should remain quantity-independent for weight-limited items');
+    }
+
     #[Group('efficiency')]
     public function testLargeQuantityIsHandledQuickly(): void
     {
@@ -274,10 +422,10 @@ class QuantityShortCircuitTest extends TestCase
      * @param Box[]                         $boxes
      * @param array<array{0: Item, 1: int}> $itemsWithQty
      */
-    private function assertEquivalent(array $boxes, array $itemsWithQty, bool $beStrictAboutItemOrdering = false, bool $throwOnUnpackableItem = true): void
+    private function assertEquivalent(array $boxes, array $itemsWithQty, bool $beStrictAboutItemOrdering = false, bool $throwOnUnpackableItem = true, ?PackedBoxSorter $sorter = null): void
     {
-        $off = $this->pack($boxes, $itemsWithQty, false, $beStrictAboutItemOrdering, $throwOnUnpackableItem);
-        $on = $this->pack($boxes, $itemsWithQty, true, $beStrictAboutItemOrdering, $throwOnUnpackableItem);
+        $off = $this->pack($boxes, $itemsWithQty, false, $beStrictAboutItemOrdering, $throwOnUnpackableItem, $sorter);
+        $on = $this->pack($boxes, $itemsWithQty, true, $beStrictAboutItemOrdering, $throwOnUnpackableItem, $sorter);
 
         self::assertSame($off['boxes'], $on['boxes'], 'Packed boxes differ between short-circuit off and on');
         self::assertSame($off['unpacked'], $on['unpacked'], 'Unpacked items differ between short-circuit off and on');
@@ -289,9 +437,12 @@ class QuantityShortCircuitTest extends TestCase
      *
      * @return array{boxes: string[], unpacked: string[]}
      */
-    private function pack(array $boxes, array $itemsWithQty, bool $shortCircuit, bool $beStrictAboutItemOrdering, bool $throwOnUnpackableItem): array
+    private function pack(array $boxes, array $itemsWithQty, bool $shortCircuit, bool $beStrictAboutItemOrdering, bool $throwOnUnpackableItem, ?PackedBoxSorter $sorter = null): array
     {
         $packer = new Packer();
+        if ($sorter !== null) {
+            $packer->setPackedBoxSorter($sorter);
+        }
         foreach ($boxes as $box) {
             $packer->addBox($box);
         }

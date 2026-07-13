@@ -15,6 +15,14 @@ even just want to know the right number of labels to print.
 
 See [documentation](https://boxpacker.io/) for more details.
 
+Large quantity optimisation
+---------------------------
+`Packer::setQuantityShortCircuit(true)` enables an opt-in optimisation for large quantities of identical items. It
+bounds the items evaluated for each box and, when using the exact built-in `DefaultPackedBoxSorter`, can replicate a
+previously solved box instead of solving it again. With any custom `PackedBoxSorter` (including subclasses of the
+default), safe per-box item capping remains enabled but identical-box replication is disabled because custom sorting
+can make the selected box depend on per-iteration evaluation order.
+
 License
 -------
 BoxPacker is MIT-licensed. 
