@@ -90,7 +90,7 @@ class ItemList implements Countable, IteratorAggregate
         do {
             if (current($this->list) === $item) {
                 unset($this->list[key($this->list)]);
-                $this->invalidateCachedPredicatesAfterRemoval();
+                $this->invalidateCachedPredicatesAfterRemoval($item);
 
                 return;
             }
@@ -104,22 +104,24 @@ class ItemList implements Countable, IteratorAggregate
             do {
                 if (current($this->list) === $packedItem->getItem()) {
                     unset($this->list[key($this->list)]);
+                    $this->invalidateCachedPredicatesAfterRemoval($packedItem->getItem());
 
                     break;
                 }
             } while (prev($this->list) !== false);
         }
-        $this->invalidateCachedPredicatesAfterRemoval();
     }
 
     /**
      * The cached hasConstrainedItems predicate is maintained on insert, but a removal may take out the last
      * constrained item, so a cached `true` can no longer be trusted afterwards and must be recomputed on next
      * access. A cached `false` stays correct - removals cannot add items - and is kept to avoid needless rescans.
+     * Removing an item that is not itself constrained cannot change the predicate, so the flag is only invalidated
+     * when the removed item could have been the last constrained one.
      */
-    private function invalidateCachedPredicatesAfterRemoval(): void
+    private function invalidateCachedPredicatesAfterRemoval(Item $removedItem): void
     {
-        if ($this->hasConstrainedItems === true) {
+        if ($this->hasConstrainedItems === true && $removedItem instanceof ConstrainedPlacementItem) {
             $this->hasConstrainedItems = null;
         }
     }
@@ -136,7 +138,7 @@ class ItemList implements Countable, IteratorAggregate
         }
 
         $item = array_pop($this->list);
-        $this->invalidateCachedPredicatesAfterRemoval();
+        $this->invalidateCachedPredicatesAfterRemoval($item);
 
         return $item;
     }
@@ -313,8 +315,8 @@ class ItemList implements Countable, IteratorAggregate
             if (($remaining[$signature] ?? 0) > 0) {
                 --$remaining[$signature];
                 unset($this->list[$key]);
+                $this->invalidateCachedPredicatesAfterRemoval($item);
             }
         }
-        $this->invalidateCachedPredicatesAfterRemoval();
     }
 }
