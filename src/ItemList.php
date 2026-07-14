@@ -119,7 +119,7 @@ class ItemList implements Countable, IteratorAggregate
                         unset($this->linkedGroupCounts[$group]);
                     }
                 }
-                $this->invalidateCachedPredicatesAfterRemoval();
+                $this->invalidateCachedPredicatesAfterRemoval($item);
 
                 return;
             }
@@ -139,26 +139,27 @@ class ItemList implements Countable, IteratorAggregate
                             unset($this->linkedGroupCounts[$group]);
                         }
                     }
+                    $this->invalidateCachedPredicatesAfterRemoval($packedItem->item);
 
                     break;
                 }
             } while (prev($this->list) !== false);
         }
-        $this->invalidateCachedPredicatesAfterRemoval();
     }
 
     /**
      * The cached hasConstrainedItems/hasNoRotationItems predicates are maintained on insert, but a removal may take
      * out the last constrained/unrotatable item, so a cached `true` can no longer be trusted afterwards and must be
      * recomputed on next access. A cached `false` stays correct - removals cannot add items - and is kept to avoid
-     * needless rescans.
+     * needless rescans. Removing an item that is not itself constrained/unrotatable cannot change either predicate,
+     * so each flag is only invalidated when the removed item could have been the last of its kind.
      */
-    private function invalidateCachedPredicatesAfterRemoval(): void
+    private function invalidateCachedPredicatesAfterRemoval(Item $removedItem): void
     {
-        if ($this->hasConstrainedItems === true) {
+        if ($this->hasConstrainedItems === true && $removedItem instanceof ConstrainedPlacementItem) {
             $this->hasConstrainedItems = null;
         }
-        if ($this->hasNoRotationItems === true) {
+        if ($this->hasNoRotationItems === true && $removedItem->getAllowedRotation() === Rotation::Never) {
             $this->hasNoRotationItems = null;
         }
     }
@@ -175,7 +176,7 @@ class ItemList implements Countable, IteratorAggregate
         }
 
         $item = array_pop($this->list);
-        $this->invalidateCachedPredicatesAfterRemoval();
+        $this->invalidateCachedPredicatesAfterRemoval($item);
 
         return $item;
     }
@@ -408,8 +409,8 @@ class ItemList implements Countable, IteratorAggregate
                         unset($this->linkedGroupCounts[$group]);
                     }
                 }
+                $this->invalidateCachedPredicatesAfterRemoval($item);
             }
         }
-        $this->invalidateCachedPredicatesAfterRemoval();
     }
 }
